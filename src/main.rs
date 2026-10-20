@@ -33,12 +33,15 @@ OPTIONS:
                          (default: let the OS choose)
     -p, --pid PID        force the KLV PID (decimal or 0x hex) instead of reading the PMT
     -g, --gap SECONDS    report KLV gaps at least this long (default: 1.0)
+    -s, --stale SECONDS  all-tags view: show tags not updated for this long in red
+                         (default: 1.0)
         --fast           files: don't pace playback, read as fast as possible
         --loop           files: restart at the end
     -h, --help           show this help
 
 KEYS:
     space   pause/resume (live: freezes the display, gap tracking continues)
+    a       toggle all-tags-seen view / latest frame
     h       toggle hex dump / decoded view
     ↑ ↓ PgUp PgDn Home   scroll the frame view
     c       clear gap history and counters
@@ -50,6 +53,7 @@ struct Args {
     iface: Ipv4Addr,
     pid: Option<u16>,
     gap: Duration,
+    stale: Duration,
     fast: bool,
     r#loop: bool,
 }
@@ -60,6 +64,7 @@ fn parse_args() -> Result<Args, String> {
         iface: Ipv4Addr::UNSPECIFIED,
         pid: None,
         gap: Duration::from_secs(1),
+        stale: Duration::from_secs(1),
         fast: false,
         r#loop: false,
     };
@@ -90,6 +95,13 @@ fn parse_args() -> Result<Args, String> {
                     return Err("--gap must be > 0".into());
                 }
                 a.gap = Duration::from_secs_f64(s);
+            }
+            "-s" | "--stale" => {
+                let s: f64 = val(&arg)?.parse().map_err(|e| format!("--stale: {e}"))?;
+                if s.is_nan() || s <= 0.0 {
+                    return Err("--stale must be > 0".into());
+                }
+                a.stale = Duration::from_secs_f64(s);
             }
             "--fast" => a.fast = true,
             "--loop" => a.r#loop = true,
@@ -154,7 +166,7 @@ fn main() -> ExitCode {
     }));
 
     let res = setup_terminal()
-        .and_then(|()| ui::App::new(input, shared.clone(), args.gap).run(rx));
+        .and_then(|()| ui::App::new(input, shared.clone(), args.gap, args.stale).run(rx));
     shared.quit.store(true, Ordering::Relaxed);
     restore_terminal();
     match res {

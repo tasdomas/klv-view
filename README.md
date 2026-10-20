@@ -43,12 +43,20 @@ INPUT:    udp://GROUP:PORT | GROUP:PORT | path\to\file.ts
   -i, --iface IP     local interface IP for the multicast join
   -p, --pid PID      force the KLV PID (e.g. 0x101) instead of reading the PMT
   -g, --gap SECONDS  gap threshold (default 1.0)
+  -s, --stale SECS   all-tags view: tags older than this are red (default 1.0)
       --fast         files: don't pace by PTS
       --loop         files: loop forever
 ```
 
-Keys: `space` pause/resume, `h` hex dump or decoded view, `↑ ↓ PgUp PgDn Home`
-scroll, `c` clear gap history and counters, `q`/`Esc` quit.
+Keys: `space` pause/resume, `a` all-tags-seen view or latest frame, `h` hex dump
+or decoded view, `↑ ↓ PgUp PgDn Home` scroll, `c` clear gap history, counters and
+seen tags, `q`/`Esc` quit.
+
+The all-tags-seen view (`a`) lists every ST 0601 tag received so far in tag
+order. Each row shows the tag's latest value and how long ago it was last
+updated. Rows not updated for more than `--stale` seconds turn red. This
+catches tags the encoder sends only some of the time, and tags that have
+stopped arriving.
 
 Pause behaviour: on a **live** stream, pausing freezes the displayed frame. Reception,
 the "since last KLV" timer and gap detection keep running, and resuming jumps to the

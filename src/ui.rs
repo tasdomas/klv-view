@@ -1,6 +1,6 @@
 //! Terminal UI: live status, KLV gap tracking and the decoded frame view.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::io::{self, Write};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -35,6 +35,14 @@ struct Frame {
     packets: Vec<DecodedPacket>,
 }
 
+/// Latest value of a tag, for the all-tags-seen view.
+#[derive(Clone)]
+struct SeenTag {
+    name: &'static str,
+    value: String,
+    at: Duration,
+}
+
 struct Gap {
     /// Wall-clock time of the last frame before the gap.
     started: DateTime<Local>,
@@ -45,9 +53,11 @@ pub struct App {
     input: Input,
     shared: Arc<Shared>,
     gap_threshold: Duration,
+    stale_threshold: Duration,
 
     paused: bool,
     show_hex: bool,
+    all_tags: bool,
     scroll: usize,
 
     frames: u64,
@@ -63,6 +73,10 @@ pub struct App {
 
     live: Option<Frame>,
     shown: Option<Frame>,
+    /// Latest value per ST 0601 tag, always kept up to date.
+    seen: BTreeMap<u64, SeenTag>,
+    /// Copy of `seen` and the clock time when paused, so the table freezes too.
+    seen_snapshot: Option<(BTreeMap<u64, SeenTag>, Duration)>,
     message: Option<(Color, String)>,
     eof: bool,
 }
@@ -72,13 +86,20 @@ const INTERVAL_HISTORY: usize = 300;
 const GAP_LINES: usize = 5;
 
 impl App {
-    pub fn new(input: Input, shared: Arc<Shared>, gap_threshold: Duration) -> Self {
+    pub fn new(
+        input: Input,
+        shared: Arc<Shared>,
+        gap_threshold: Duration,
+        stale_threshold: Duration,
+    ) -> Self {
         App {
             input,
             shared,
             gap_threshold,
+            stale_threshold,
             paused: false,
             show_hex: false,
+            all_tags: false,
             scroll: 0,
             frames: 0,
             checksum_errors: 0,
@@ -92,6 +113,8 @@ impl App {
             longest_gap: Duration::ZERO,
             live: None,
             shown: None,
+            seen: BTreeMap::new(),
+            seen_snapshot: None,
             message: None,
             eof: false,
         }
@@ -127,6 +150,10 @@ impl App {
                                 self.show_hex = !self.show_hex;
                                 self.scroll = 0;
                             }
+                            KeyCode::Char('a') => {
+                                self.all_tags = !self.all_tags;
+                                self.scroll = 0;
+                            }
                             KeyCode::Char('c') => self.clear_stats(),
                             KeyCode::Up => self.scroll = self.scroll.saturating_sub(1),
                             KeyCode::Down => self.scroll += 1,
@@ -148,8 +175,11 @@ impl App {
             // Files actually stop reading; freeze the clock so it isn't a gap.
             self.shared.clock.set_paused(self.paused);
         }
-        if !self.paused {
+        if self.paused {
+            self.seen_snapshot = Some((self.seen.clone(), self.shared.clock.now()));
+        } else {
             self.shown = self.live.take();
+            self.seen_snapshot = None;
         }
     }
 
@@ -159,6 +189,7 @@ impl App {
         self.intervals.clear();
         self.checksum_errors = 0;
         self.empty_payloads = 0;
+        self.seen.clear();
         self.message = None;
     }
 
@@ -232,6 +263,19 @@ impl App {
             self.arrivals.pop_front();
         }
 
+        for p in packets.iter().filter(|p| p.is_0601) {
+            for f in &p.fields {
+                self.seen.insert(
+                    f.tag,
+                    SeenTag {
+                        name: f.name,
+                        value: f.value.clone(),
+                        at,
+                    },
+                );
+            }
+        }
+
         self.frames += 1;
         let frame = Frame {
             number: self.frames,
@@ -284,7 +328,7 @@ impl App {
         }
         lines.push(l);
         lines.push(Line::dim(
-            "space pause/resume · h hex/decoded · ↑↓ PgUp PgDn scroll · c clear stats · q quit",
+            "space pause/resume · a all tags/frame · h hex/decoded · ↑↓ PgUp PgDn scroll · c clear stats · q quit",
         ));
         lines.push(Line::new());
 
@@ -438,9 +482,13 @@ impl App {
         lines.push(Line::dim(&"─".repeat(w)));
 
         // Frame view (scrollable)
-        let body = match &self.shown {
-            None => vec![Line::dim("waiting for KLV data…")],
-            Some(f) => self.frame_lines(f),
+        let body = if self.all_tags {
+            self.all_tags_lines(now)
+        } else {
+            match &self.shown {
+                None => vec![Line::dim("waiting for KLV data…")],
+                Some(f) => self.frame_lines(f),
+            }
         };
         let avail = h.saturating_sub(lines.len());
         let max_scroll = body.len().saturating_sub(avail);
@@ -455,6 +503,55 @@ impl App {
         }
         queue!(out, Clear(ClearType::FromCursorDown))?;
         out.flush()
+    }
+
+    fn all_tags_lines(&self, now: Duration) -> Vec<Line> {
+        let (seen, now) = match &self.seen_snapshot {
+            Some((s, t)) => (s, *t),
+            None => (&self.seen, now),
+        };
+        if seen.is_empty() {
+            return vec![Line::dim("no ST 0601 tags seen yet…")];
+        }
+        let age = |t: &SeenTag| now.saturating_sub(t.at);
+        let stale = seen
+            .values()
+            .filter(|t| age(t) > self.stale_threshold)
+            .count();
+        let mut v = Vec::new();
+        let mut l = Line::new();
+        l.bold(Color::Cyan, "All tags seen");
+        l.push(None, &format!("   {} tags   ", seen.len()));
+        l.push(
+            if stale > 0 { Some(Color::Red) } else { None },
+            &format!(
+                "{stale} not updated for > {}",
+                fmt_dur(self.stale_threshold)
+            ),
+        );
+        v.push(l);
+        let name_w = seen
+            .values()
+            .map(|t| t.name.chars().count())
+            .max()
+            .unwrap_or(0);
+        for (tag, t) in seen {
+            let a = age(t);
+            let color = (a > self.stale_threshold).then_some(Color::Red);
+            let mut l = Line::new();
+            l.push(color.or(Some(Color::DarkGrey)), &format!("  {tag:>3}  "));
+            l.push(
+                color.or(Some(Color::Cyan)),
+                &format!("{:<name_w$}  ", t.name),
+            );
+            l.push(
+                color.or(Some(Color::DarkGrey)),
+                &format!("{:>9}  ", fmt_dur(a)),
+            );
+            l.push(color, &t.value);
+            v.push(l);
+        }
+        v
     }
 
     fn frame_lines(&self, f: &Frame) -> Vec<Line> {
