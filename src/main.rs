@@ -1,1 +1,3 @@
+mod ts;
+
 fn main() {}
