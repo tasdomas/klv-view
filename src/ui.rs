@@ -179,11 +179,13 @@ impl App {
             .into_iter()
             .map(|p| {
                 let is_0601 = klv::is_st0601(&p.key);
-                let (checksum, fields) = if is_0601 {
+                let (checksum, mut fields) = if is_0601 {
                     (klv::st0601_checksum(&p.raw), klv::decode_st0601(p.value()))
                 } else {
                     (None, Vec::new())
                 };
+                // Display in tag order; stable, so repeated tags keep wire order.
+                fields.sort_by_key(|f| f.tag);
                 DecodedPacket {
                     key: p.key,
                     raw: p.raw,
