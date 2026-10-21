@@ -4,6 +4,8 @@ Terminal viewer for KLV metadata (MISB ST 0601) carried in an MPEG-TS stream.
 It reads the TS directly from UDP multicast and needs no GStreamer. See `HANDOFF.md`
 for the stream details.
 
+![klv-view showing a decoded MISB ST 0601 frame, time since the last KLV frame and error counters](screenshot.png)
+
 - Demuxes TS (PAT/PMT), finds the KLV PID automatically:
   - `stream_type 0x15`: synchronous metadata, ST 1402 AU cells
   - `stream_type 0x06` + `KLVA` registration: asynchronous KLV
