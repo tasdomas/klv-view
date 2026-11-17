@@ -7,3 +7,4 @@ edition = "2024"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 crossterm = "0.28"
 socket2 = { version = "0.5", features = ["all"] }
+misb = "0.1.1"

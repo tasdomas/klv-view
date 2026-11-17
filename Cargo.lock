@@ -168,6 +168,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "crossterm",
+ "misb",
  "socket2",
 ]
 
@@ -209,6 +210,12 @@ dependencies = [
  "wasi",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "misb"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "acdb9d45c50beffb784efc897409ed50a96bb6540f7c975cc216ed14aadf6f87"
 
 [[package]]
 name = "num-traits"
