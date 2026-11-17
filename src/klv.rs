@@ -171,46 +171,6 @@ fn int(v: &[u8]) -> Option<i64> {
     })
 }
 
-/// Unsigned integer mapped linearly onto [min, max].
-fn umap(v: &[u8], min: f64, max: f64) -> Option<f64> {
-    let u = uint(v)?;
-    let full = ((1u128 << (v.len() * 8)) - 1) as f64;
-    Some(min + u as f64 * (max - min) / full)
-}
-
-/// Signed integer mapped symmetrically onto [-range, range]; the most negative
-/// value is reserved as the "out of range" indicator.
-fn smap(v: &[u8], range: f64) -> Result<f64, &'static str> {
-    let i = int(v).ok_or("bad length")?;
-    let bits = v.len() * 8;
-    let min = if bits == 64 {
-        i64::MIN
-    } else {
-        -(1i64 << (bits - 1))
-    };
-    if i == min {
-        return Err("out of range");
-    }
-    let half = ((1u128 << (bits - 1)) - 1) as f64;
-    Ok(i as f64 * range / half)
-}
-
-/// MISB ST 1201 IMAPB floating point mapping.
-fn imapb(v: &[u8], a: f64, b: f64) -> Option<f64> {
-    let y = uint(v)? as f64;
-    let l = v.len() as i32;
-    let b_pow = (b - a).log2().ceil() as i32;
-    let d_pow = 8 * l - 1;
-    let s_f = 2f64.powi(d_pow - b_pow);
-    let s_r = 2f64.powi(b_pow - d_pow);
-    let z = if a < 0.0 && b > 0.0 {
-        s_f * a - (s_f * a).floor()
-    } else {
-        0.0
-    };
-    Some(s_r * (y - z) + a)
-}
-
 fn us_time(v: &[u8]) -> String {
     match uint(v) {
         Some(us) => match chrono::DateTime::from_timestamp_micros(us as i64) {
@@ -232,17 +192,20 @@ fn text(v: &[u8]) -> String {
     format!("\"{}\"", String::from_utf8_lossy(v).trim_end_matches('\0'))
 }
 
-fn f(o: Option<f64>, prec: usize, unit: &str) -> String {
-    match o {
-        Some(x) => format!("{x:.prec$}{unit}"),
-        None => "?".into(),
-    }
-}
-
-fn s(r: Result<f64, &'static str>, prec: usize, unit: &str) -> String {
-    match r {
-        Ok(x) => format!("{x:.prec$}{unit}"),
-        Err(e) => format!("N/A ({e})"),
+/// A mapped ST 0601 value (linear or IMAPB), decoded by the `misb` crate. The
+/// integer is scaled by the tag's standard length even when an encoder sends
+/// more or fewer bytes (the public "Day Flight" sample sends tag 22 in four
+/// bytes), and IMAPB special values (infinity, NaN, out of range) are flagged
+/// instead of being shown as numbers.
+fn num(tag: u64, v: &[u8], prec: usize, unit: &str) -> String {
+    use misb::st0601::{Value, decode_value, tag_info};
+    let Some(info) = u32::try_from(tag).ok().and_then(tag_info) else {
+        return hex(v);
+    };
+    match decode_value(info.kind, v) {
+        Value::Float(x) => format!("{x:.prec$}{unit}"),
+        Value::OutOfRange => "N/A (out of range)".into(),
+        _ => format!("N/A (bad length) {}", hex(v)),
     }
 }
 
@@ -260,11 +223,6 @@ fn nested(v: &[u8]) -> String {
 }
 
 const DEG: &str = "°";
-const ALT: (f64, f64) = (-900.0, 19000.0);
-
-fn alt(v: &[u8]) -> String {
-    f(umap(v, ALT.0, ALT.1), 1, " m")
-}
 
 fn decode_tag(tag: u64, v: &[u8]) -> (&'static str, String) {
     match tag {
@@ -272,47 +230,47 @@ fn decode_tag(tag: u64, v: &[u8]) -> (&'static str, String) {
         2 => ("Precision Time Stamp", us_time(v)),
         3 => ("Mission ID", text(v)),
         4 => ("Platform Tail Number", text(v)),
-        5 => ("Platform Heading", f(umap(v, 0.0, 360.0), 4, DEG)),
-        6 => ("Platform Pitch", s(smap(v, 20.0), 4, DEG)),
-        7 => ("Platform Roll", s(smap(v, 50.0), 4, DEG)),
+        5 => ("Platform Heading", num(tag, v, 4, DEG)),
+        6 => ("Platform Pitch", num(tag, v, 4, DEG)),
+        7 => ("Platform Roll", num(tag, v, 4, DEG)),
         8 => ("Platform True Airspeed", u(v, " m/s")),
         9 => ("Platform Indicated Airspeed", u(v, " m/s")),
         10 => ("Platform Designation", text(v)),
         11 => ("Image Source Sensor", text(v)),
         12 => ("Image Coordinate System", text(v)),
-        13 => ("Sensor Latitude", s(smap(v, 90.0), 7, DEG)),
-        14 => ("Sensor Longitude", s(smap(v, 180.0), 7, DEG)),
-        15 => ("Sensor True Altitude", alt(v)),
-        16 => ("Sensor Horizontal FOV", f(umap(v, 0.0, 180.0), 4, DEG)),
-        17 => ("Sensor Vertical FOV", f(umap(v, 0.0, 180.0), 4, DEG)),
-        18 => ("Sensor Rel. Azimuth", f(umap(v, 0.0, 360.0), 4, DEG)),
-        19 => ("Sensor Rel. Elevation", s(smap(v, 180.0), 4, DEG)),
-        20 => ("Sensor Rel. Roll", f(umap(v, 0.0, 360.0), 4, DEG)),
-        21 => ("Slant Range", f(umap(v, 0.0, 5_000_000.0), 1, " m")),
-        22 => ("Target Width", f(umap(v, 0.0, 10_000.0), 1, " m")),
-        23 => ("Frame Center Latitude", s(smap(v, 90.0), 7, DEG)),
-        24 => ("Frame Center Longitude", s(smap(v, 180.0), 7, DEG)),
-        25 => ("Frame Center Elevation", alt(v)),
-        26 => ("Offset Corner Lat Pt 1", s(smap(v, 0.075), 7, DEG)),
-        27 => ("Offset Corner Lon Pt 1", s(smap(v, 0.075), 7, DEG)),
-        28 => ("Offset Corner Lat Pt 2", s(smap(v, 0.075), 7, DEG)),
-        29 => ("Offset Corner Lon Pt 2", s(smap(v, 0.075), 7, DEG)),
-        30 => ("Offset Corner Lat Pt 3", s(smap(v, 0.075), 7, DEG)),
-        31 => ("Offset Corner Lon Pt 3", s(smap(v, 0.075), 7, DEG)),
-        32 => ("Offset Corner Lat Pt 4", s(smap(v, 0.075), 7, DEG)),
-        33 => ("Offset Corner Lon Pt 4", s(smap(v, 0.075), 7, DEG)),
+        13 => ("Sensor Latitude", num(tag, v, 7, DEG)),
+        14 => ("Sensor Longitude", num(tag, v, 7, DEG)),
+        15 => ("Sensor True Altitude", num(tag, v, 1, " m")),
+        16 => ("Sensor Horizontal FOV", num(tag, v, 4, DEG)),
+        17 => ("Sensor Vertical FOV", num(tag, v, 4, DEG)),
+        18 => ("Sensor Rel. Azimuth", num(tag, v, 4, DEG)),
+        19 => ("Sensor Rel. Elevation", num(tag, v, 4, DEG)),
+        20 => ("Sensor Rel. Roll", num(tag, v, 4, DEG)),
+        21 => ("Slant Range", num(tag, v, 1, " m")),
+        22 => ("Target Width", num(tag, v, 1, " m")),
+        23 => ("Frame Center Latitude", num(tag, v, 7, DEG)),
+        24 => ("Frame Center Longitude", num(tag, v, 7, DEG)),
+        25 => ("Frame Center Elevation", num(tag, v, 1, " m")),
+        26 => ("Offset Corner Lat Pt 1", num(tag, v, 7, DEG)),
+        27 => ("Offset Corner Lon Pt 1", num(tag, v, 7, DEG)),
+        28 => ("Offset Corner Lat Pt 2", num(tag, v, 7, DEG)),
+        29 => ("Offset Corner Lon Pt 2", num(tag, v, 7, DEG)),
+        30 => ("Offset Corner Lat Pt 3", num(tag, v, 7, DEG)),
+        31 => ("Offset Corner Lon Pt 3", num(tag, v, 7, DEG)),
+        32 => ("Offset Corner Lat Pt 4", num(tag, v, 7, DEG)),
+        33 => ("Offset Corner Lon Pt 4", num(tag, v, 7, DEG)),
         34 => ("Icing Detected", u(v, "")),
-        35 => ("Wind Direction", f(umap(v, 0.0, 360.0), 2, DEG)),
-        36 => ("Wind Speed", f(umap(v, 0.0, 100.0), 1, " m/s")),
-        37 => ("Static Pressure", f(umap(v, 0.0, 5000.0), 1, " mbar")),
-        38 => ("Density Altitude", alt(v)),
+        35 => ("Wind Direction", num(tag, v, 2, DEG)),
+        36 => ("Wind Speed", num(tag, v, 1, " m/s")),
+        37 => ("Static Pressure", num(tag, v, 1, " mbar")),
+        38 => ("Density Altitude", num(tag, v, 1, " m")),
         39 => (
             "Outside Air Temperature",
             int(v).map_or(hex(v), |x| format!("{x} °C")),
         ),
-        40 => ("Target Location Latitude", s(smap(v, 90.0), 7, DEG)),
-        41 => ("Target Location Longitude", s(smap(v, 180.0), 7, DEG)),
-        42 => ("Target Location Elevation", alt(v)),
+        40 => ("Target Location Latitude", num(tag, v, 7, DEG)),
+        41 => ("Target Location Longitude", num(tag, v, 7, DEG)),
+        42 => ("Target Location Elevation", num(tag, v, 1, " m")),
         43 => (
             "Target Track Gate Width",
             uint(v).map_or(hex(v), |x| format!("{} px", x * 2)),
@@ -321,35 +279,23 @@ fn decode_tag(tag: u64, v: &[u8]) -> (&'static str, String) {
             "Target Track Gate Height",
             uint(v).map_or(hex(v), |x| format!("{} px", x * 2)),
         ),
-        45 => (
-            "Target Error Estimate CE90",
-            f(umap(v, 0.0, 4095.0), 1, " m"),
-        ),
-        46 => (
-            "Target Error Estimate LE90",
-            f(umap(v, 0.0, 4095.0), 1, " m"),
-        ),
+        45 => ("Target Error Estimate CE90", num(tag, v, 1, " m")),
+        46 => ("Target Error Estimate LE90", num(tag, v, 1, " m")),
         47 => (
             "Generic Flag Data",
             uint(v).map_or(hex(v), |x| format!("0b{x:08b}")),
         ),
         48 => ("Security Local Set", nested(v)),
-        49 => ("Differential Pressure", f(umap(v, 0.0, 5000.0), 1, " mbar")),
-        50 => ("Platform Angle of Attack", s(smap(v, 20.0), 4, DEG)),
-        51 => ("Platform Vertical Speed", s(smap(v, 180.0), 2, " m/s")),
-        52 => ("Platform Sideslip Angle", s(smap(v, 20.0), 4, DEG)),
-        53 => (
-            "Airfield Barometric Pressure",
-            f(umap(v, 0.0, 5000.0), 1, " mbar"),
-        ),
-        54 => ("Airfield Elevation", alt(v)),
-        55 => ("Relative Humidity", f(umap(v, 0.0, 100.0), 1, " %")),
+        49 => ("Differential Pressure", num(tag, v, 1, " mbar")),
+        50 => ("Platform Angle of Attack", num(tag, v, 4, DEG)),
+        51 => ("Platform Vertical Speed", num(tag, v, 2, " m/s")),
+        52 => ("Platform Sideslip Angle", num(tag, v, 4, DEG)),
+        53 => ("Airfield Barometric Pressure", num(tag, v, 1, " mbar")),
+        54 => ("Airfield Elevation", num(tag, v, 1, " m")),
+        55 => ("Relative Humidity", num(tag, v, 1, " %")),
         56 => ("Platform Ground Speed", u(v, " m/s")),
-        57 => ("Ground Range", f(umap(v, 0.0, 5_000_000.0), 1, " m")),
-        58 => (
-            "Platform Fuel Remaining",
-            f(umap(v, 0.0, 10_000.0), 1, " kg"),
-        ),
+        57 => ("Ground Range", num(tag, v, 1, " m")),
+        58 => ("Platform Fuel Remaining", num(tag, v, 1, " kg")),
         59 => ("Platform Call Sign", text(v)),
         60 => ("Weapon Load", hex(v)),
         61 => ("Weapon Fired", hex(v)),
@@ -369,18 +315,18 @@ fn decode_tag(tag: u64, v: &[u8]) -> (&'static str, String) {
                 _ => hex(v),
             },
         ),
-        64 => ("Platform Magnetic Heading", f(umap(v, 0.0, 360.0), 4, DEG)),
+        64 => ("Platform Magnetic Heading", num(tag, v, 4, DEG)),
         65 => ("UAS Datalink LS Version", u(v, "")),
-        67 => ("Alt. Platform Latitude", s(smap(v, 90.0), 7, DEG)),
-        68 => ("Alt. Platform Longitude", s(smap(v, 180.0), 7, DEG)),
-        69 => ("Alt. Platform Altitude", alt(v)),
+        67 => ("Alt. Platform Latitude", num(tag, v, 7, DEG)),
+        68 => ("Alt. Platform Longitude", num(tag, v, 7, DEG)),
+        69 => ("Alt. Platform Altitude", num(tag, v, 1, " m")),
         70 => ("Alt. Platform Name", text(v)),
-        71 => ("Alt. Platform Heading", f(umap(v, 0.0, 360.0), 4, DEG)),
+        71 => ("Alt. Platform Heading", num(tag, v, 4, DEG)),
         72 => ("Event Start Time", us_time(v)),
         73 => ("RVT Local Set", nested(v)),
         74 => ("VMTI Local Set", nested(v)),
-        75 => ("Sensor Ellipsoid Height", alt(v)),
-        76 => ("Alt. Platform Ellipsoid Height", alt(v)),
+        75 => ("Sensor Ellipsoid Height", num(tag, v, 1, " m")),
+        76 => ("Alt. Platform Ellipsoid Height", num(tag, v, 1, " m")),
         77 => (
             "Operational Mode",
             match uint(v) {
@@ -393,70 +339,49 @@ fn decode_tag(tag: u64, v: &[u8]) -> (&'static str, String) {
                 _ => hex(v),
             },
         ),
-        78 => ("Frame Center HAE", alt(v)),
-        79 => ("Sensor North Velocity", s(smap(v, 327.0), 2, " m/s")),
-        80 => ("Sensor East Velocity", s(smap(v, 327.0), 2, " m/s")),
+        78 => ("Frame Center HAE", num(tag, v, 1, " m")),
+        79 => ("Sensor North Velocity", num(tag, v, 2, " m/s")),
+        80 => ("Sensor East Velocity", num(tag, v, 2, " m/s")),
         81 => ("Image Horizon Pixel Pack", hex(v)),
-        82 => ("Corner Latitude Pt 1", s(smap(v, 90.0), 7, DEG)),
-        83 => ("Corner Longitude Pt 1", s(smap(v, 180.0), 7, DEG)),
-        84 => ("Corner Latitude Pt 2", s(smap(v, 90.0), 7, DEG)),
-        85 => ("Corner Longitude Pt 2", s(smap(v, 180.0), 7, DEG)),
-        86 => ("Corner Latitude Pt 3", s(smap(v, 90.0), 7, DEG)),
-        87 => ("Corner Longitude Pt 3", s(smap(v, 180.0), 7, DEG)),
-        88 => ("Corner Latitude Pt 4", s(smap(v, 90.0), 7, DEG)),
-        89 => ("Corner Longitude Pt 4", s(smap(v, 180.0), 7, DEG)),
-        90 => ("Platform Pitch (full)", s(smap(v, 90.0), 4, DEG)),
-        91 => ("Platform Roll (full)", s(smap(v, 90.0), 4, DEG)),
-        92 => ("Platform Angle of Attack (full)", s(smap(v, 90.0), 4, DEG)),
-        93 => ("Platform Sideslip (full)", s(smap(v, 180.0), 4, DEG)),
+        82 => ("Corner Latitude Pt 1", num(tag, v, 7, DEG)),
+        83 => ("Corner Longitude Pt 1", num(tag, v, 7, DEG)),
+        84 => ("Corner Latitude Pt 2", num(tag, v, 7, DEG)),
+        85 => ("Corner Longitude Pt 2", num(tag, v, 7, DEG)),
+        86 => ("Corner Latitude Pt 3", num(tag, v, 7, DEG)),
+        87 => ("Corner Longitude Pt 3", num(tag, v, 7, DEG)),
+        88 => ("Corner Latitude Pt 4", num(tag, v, 7, DEG)),
+        89 => ("Corner Longitude Pt 4", num(tag, v, 7, DEG)),
+        90 => ("Platform Pitch (full)", num(tag, v, 4, DEG)),
+        91 => ("Platform Roll (full)", num(tag, v, 4, DEG)),
+        92 => ("Platform Angle of Attack (full)", num(tag, v, 4, DEG)),
+        93 => ("Platform Sideslip (full)", num(tag, v, 4, DEG)),
         94 => ("MIIS Core Identifier", hex(v)),
         95 => ("SAR Motion Imagery LS", nested(v)),
-        96 => (
-            "Target Width Extended",
-            f(imapb(v, 0.0, 1_500_000.0), 2, " m"),
-        ),
+        96 => ("Target Width Extended", num(tag, v, 2, " m")),
         97 => ("Range Image LS", nested(v)),
         98 => ("Geo-Registration LS", nested(v)),
         99 => ("Composite Imaging LS", nested(v)),
         100 => ("Segment LS", nested(v)),
         101 => ("Amend LS", nested(v)),
         102 => ("SDCC-FLP", hex(v)),
-        103 => (
-            "Density Altitude Extended",
-            f(imapb(v, -900.0, 40_000.0), 2, " m"),
-        ),
-        104 => (
-            "Sensor Ellipsoid Height Ext.",
-            f(imapb(v, -900.0, 40_000.0), 2, " m"),
-        ),
-        105 => (
-            "Alt. Platform Ellipsoid Height Ext.",
-            f(imapb(v, -900.0, 40_000.0), 2, " m"),
-        ),
+        103 => ("Density Altitude Extended", num(tag, v, 2, " m")),
+        104 => ("Sensor Ellipsoid Height Ext.", num(tag, v, 2, " m")),
+        105 => ("Alt. Platform Ellipsoid Height Ext.", num(tag, v, 2, " m")),
         106 => ("Stream Designator", text(v)),
         107 => ("Operational Base", text(v)),
         108 => ("Broadcast Source", text(v)),
-        109 => (
-            "Range To Recovery Location",
-            f(imapb(v, 0.0, 21_000.0), 3, " km"),
-        ),
+        109 => ("Range To Recovery Location", num(tag, v, 3, " km")),
         110 => ("Time Airborne", u(v, " s")),
         111 => ("Propulsion Unit Speed", u(v, " RPM")),
-        112 => ("Platform Course Angle", f(imapb(v, 0.0, 360.0), 4, DEG)),
-        113 => ("Altitude AGL", f(imapb(v, -900.0, 40_000.0), 2, " m")),
-        114 => ("Radar Altimeter", f(imapb(v, -900.0, 40_000.0), 2, " m")),
+        112 => ("Platform Course Angle", num(tag, v, 4, DEG)),
+        113 => ("Altitude AGL", num(tag, v, 2, " m")),
+        114 => ("Radar Altimeter", num(tag, v, 2, " m")),
         115 => ("Control Command", hex(v)),
         116 => ("Control Command Verification", hex(v)),
-        117 => (
-            "Sensor Azimuth Rate",
-            f(imapb(v, -1000.0, 1000.0), 4, "°/s"),
-        ),
-        118 => (
-            "Sensor Elevation Rate",
-            f(imapb(v, -1000.0, 1000.0), 4, "°/s"),
-        ),
-        119 => ("Sensor Roll Rate", f(imapb(v, -1000.0, 1000.0), 4, "°/s")),
-        120 => ("On-board MI Storage Full", f(imapb(v, 0.0, 100.0), 2, " %")),
+        117 => ("Sensor Azimuth Rate", num(tag, v, 4, "°/s")),
+        118 => ("Sensor Elevation Rate", num(tag, v, 4, "°/s")),
+        119 => ("Sensor Roll Rate", num(tag, v, 4, "°/s")),
+        120 => ("On-board MI Storage Full", num(tag, v, 2, " %")),
         121 => ("Active Wavelength List", hex(v)),
         122 => ("Country Codes", hex(v)),
         123 => ("Number of NAVSATs in View", u(v, "")),
@@ -471,12 +396,9 @@ fn decode_tag(tag: u64, v: &[u8]) -> (&'static str, String) {
         129 => ("Target ID", text(v)),
         130 => ("Airbase Locations", hex(v)),
         131 => ("Take-off Time", us_time(v)),
-        132 => (
-            "Transmission Frequency",
-            f(imapb(v, 1.0, 99_999.0), 3, " MHz"),
-        ),
+        132 => ("Transmission Frequency", num(tag, v, 3, " MHz")),
         133 => ("On-board MI Storage Capacity", u(v, " GB")),
-        134 => ("Zoom Percentage", f(imapb(v, 0.0, 100.0), 2, " %")),
+        134 => ("Zoom Percentage", num(tag, v, 2, " %")),
         135 => ("Communications Method", text(v)),
         136 => ("Leap Seconds", int(v).map_or(hex(v), |x| format!("{x} s"))),
         137 => (
@@ -498,29 +420,38 @@ mod tests {
 
     #[test]
     fn signed_mapping() {
-        assert!((smap(&[0x7f, 0xff], 20.0).unwrap() - 20.0).abs() < 1e-9);
-        assert!(smap(&[0x80, 0x00], 20.0).is_err());
+        assert_eq!(num(6, &[0x7f, 0xff], 4, DEG), "20.0000°");
+        assert_eq!(num(6, &[0x80, 0x00], 4, DEG), "N/A (out of range)");
         // ST 0601 example: Sensor Latitude 0x5595B66D -> 60.1768229669783°
-        let lat = smap(&[0x55, 0x95, 0xb6, 0x6d], 90.0).unwrap();
-        assert!((lat - 60.176822966978335).abs() < 1e-9);
+        assert_eq!(num(13, &[0x55, 0x95, 0xb6, 0x6d], 7, DEG), "60.1768230°");
     }
 
     #[test]
     fn unsigned_mapping() {
         // ST 0601 example: Platform Heading 0x71C2 -> 159.9744°
-        let h = umap(&[0x71, 0xc2], 0.0, 360.0).unwrap();
-        assert!((h - 159.97436484321355).abs() < 1e-9);
+        assert_eq!(num(5, &[0x71, 0xc2], 4, DEG), "159.9744°");
         // ST 0601 example: Sensor True Altitude 0xC221 -> 14190.72 m
-        let a = umap(&[0xc2, 0x21], -900.0, 19000.0).unwrap();
-        assert!((a - 14190.719462882427).abs() < 1e-6);
+        assert_eq!(num(15, &[0xc2, 0x21], 1, " m"), "14190.7 m");
+    }
+
+    #[test]
+    fn length_other_than_standard() {
+        // Day Flight.mpg (samples.ffmpeg.org) sends Target Width (tag 22) as
+        // 00 00 01 C9: 457 on the 2-byte scale is 69.7 m. Scaling by the
+        // 4-byte length gave 0.0 m.
+        assert_eq!(num(22, &[0x00, 0x00, 0x01, 0xc9], 1, " m"), "69.7 m");
     }
 
     #[test]
     fn imapb_mapping() {
-        assert_eq!(imapb(&[0x00, 0x00, 0x00], 0.0, 100.0).unwrap(), 0.0);
+        assert_eq!(num(120, &[0x00, 0x00, 0x00], 2, " %"), "0.00 %");
         // -900..40000 in 2 bytes: bPow = 16, dPow = 15, so the step is 2 m.
-        let v = imapb(&[0x40, 0x00], -900.0, 40_000.0).unwrap();
-        assert!((v - (-900.0 + 0x4000 as f64 * 2f64.powi(16 - 15))).abs() < 1e-9);
+        assert_eq!(
+            num(103, &[0x40, 0x00], 2, " m"),
+            format!("{:.2} m", -900.0 + 0x4000 as f64 * 2.0)
+        );
+        // ST 1201 special values: 0xC8.. is +infinity, not a height.
+        assert_eq!(num(103, &[0xc8, 0x00], 2, " m"), "N/A (out of range)");
     }
 
     #[test]
